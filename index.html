@@ -205,6 +205,14 @@ nav.bottomnav .dot{width:4px;height:4px;border-radius:9999px;background:var(--ac
 #splash .sp-ttl{font-family:var(--font-mincho);font-size:1.5rem;font-weight:700;color:var(--text)}
 #splash .sp-sub{font-size:.8125rem;color:var(--dim);letter-spacing:.2em}
 @media (prefers-reduced-motion:reduce){#splash{animation-duration:.1s;animation-delay:.1s}#splash img{animation:none}}
+.examcard{border-radius:1.25rem;padding:1.125rem 1.25rem;color:#fff;background:linear-gradient(120deg,var(--gold),var(--accent));box-shadow:0 14px 30px rgba(30,35,60,.22);position:relative;overflow:hidden}
+.examcard::after{content:"";position:absolute;top:-3.5rem;right:-2.5rem;width:9rem;height:9rem;border-radius:9999px;background:rgba(255,255,255,.16);pointer-events:none}
+.examcard .days{font-size:3rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.examset{border:1px dashed var(--gold);border-radius:1.25rem;padding:1rem 1.25rem;background:var(--surface)}
+.dateinput{border-radius:.75rem;border:1px solid var(--border);padding:.625rem .75rem;font-size:1rem;outline:none;background:var(--paper);color:var(--text);box-sizing:border-box;font-family:inherit}
+.drillcard{border-radius:var(--radius);background:var(--paper);color:var(--ink);border:1px solid var(--border);box-shadow:var(--card-shadow);padding:2rem 1.5rem;text-align:center;cursor:pointer}
+.relchip{display:inline-flex;align-items:baseline;gap:.3rem;border-radius:9999px;padding:.3rem .7rem;font-size:.8125rem;font-weight:500}
+.weekimg{width:100%;border-radius:1rem;border:1px solid var(--border);box-shadow:var(--card-shadow);display:block}
 @media (min-width:640px){.twocol{display:grid;grid-template-columns:1fr 1fr;gap:.625rem}}
 </style>
 </head>
@@ -253,7 +261,7 @@ function lsDel(k){ try{ localStorage.removeItem(k); }catch(e){} }
 /* ---------- persistent store (this device only) ---------- */
 function defaultStore(){
   return {
-    words: [], reviews: [], lookupHistory: [],
+    words: [], reviews: [], lookupHistory: [], examDate: null,
     settings: { dailyCount: 10, apiKey: "", model: "deepseek-chat", cardMode: "jp2cn" },
     nextWordId: 1, nextReviewId: 1, nextHistId: 1
   };
@@ -373,7 +381,8 @@ function normWord(w){
     word: String(w.word||"").trim(), reading: String(w.reading||""), pos: String(w.pos||""),
     meaning: String(w.meaning||""), exampleJp: String(w.exampleJp||""), exampleCn: String(w.exampleCn||""),
     mnemonic: w.mnemonic ? String(w.mnemonic) : null,
-    freqRank: (w.freqRank>=1 && w.freqRank<=5) ? Math.round(w.freqRank) : null
+    freqRank: (w.freqRank>=1 && w.freqRank<=5) ? Math.round(w.freqRank) : null,
+    related: (w.related && typeof w.related==="object") ? w.related : null
   };
 }
 function generateWords(count){
@@ -393,7 +402,7 @@ function generateWords(count){
     if(!fresh.length) throw new Error("AI 这次没有返回新词，请再点一次生成。");
     var today = todayJST();
     fresh.forEach(function(w){
-      DB.words.push({ id: DB.nextWordId++, word:w.word, reading:w.reading, pos:w.pos, meaning:w.meaning, exampleJp:w.exampleJp, exampleCn:w.exampleCn, mnemonic:w.mnemonic, freqRank:w.freqRank, box:0, dueDate:today, batchDate:today, source:"ai", createdAt:new Date().toISOString() });
+      DB.words.push({ id: DB.nextWordId++, word:w.word, reading:w.reading, pos:w.pos, meaning:w.meaning, exampleJp:w.exampleJp, exampleCn:w.exampleCn, mnemonic:w.mnemonic, freqRank:w.freqRank, related:null, box:0, dueDate:today, batchDate:today, source:"ai", createdAt:new Date().toISOString() });
     });
     saveDB();
     return fresh.length;
@@ -417,6 +426,106 @@ function aiMnemonic(word, regenerate){
     saveDB();
     return word.mnemonic;
   });
+}
+
+function aiRelated(word){
+  var system = "你是一位资深日语教师。只输出 JSON，不要输出任何其他文字。";
+  var user = [
+    "为日语单词「"+word.word+"」（读音 "+word.reading+"，意思："+word.meaning+"）整理拓展词汇：",
+    "synonyms：3 个同义词或近义词，每个给 word（日语）和 meaning（简短中文意思）；antonyms：2 个反义词，同样给 word 和 meaning（确实没有合适的反义词就给空数组）；collocations：3 个最常见的搭配短语（日语短语，可在括号里附简短中文）。",
+    '输出格式：{"synonyms":[{"word":"…","meaning":"…"}],"antonyms":[{"word":"…","meaning":"…"}],"collocations":["…"]}'
+  ].join("\n");
+  return callDeepSeek(system, user).then(function(raw){
+    var p = parseJsonObject(raw);
+    function cleanList(a){
+      return (Array.isArray(a) ? a : []).slice(0,4).map(function(x){
+        return { word:String((x&&x.word)||"").trim(), meaning:String((x&&x.meaning)||"").trim() };
+      }).filter(function(x){ return x.word; });
+    }
+    var rel = {
+      synonyms: cleanList(p.synonyms),
+      antonyms: cleanList(p.antonyms),
+      collocations: (Array.isArray(p.collocations) ? p.collocations : []).slice(0,4).map(function(x){ return String(x||"").trim(); }).filter(Boolean)
+    };
+    if(!rel.synonyms.length && !rel.antonyms.length && !rel.collocations.length) throw new Error("这次没整理出来，请再试一次。");
+    word.related = rel; saveDB();
+    return rel;
+  });
+}
+function relatedHtml(w, onPaper, btnAttr){
+  var chipBg = onPaper ? "var(--paper-dim)" : "var(--surface-2)";
+  var chipFg = onPaper ? "var(--ink)" : "var(--text)";
+  var dimFg = onPaper ? "var(--ink-dim)" : "var(--dim)";
+  if(w.related){
+    var r = w.related;
+    function group(label, items, isColl){
+      if(!items || !items.length) return "";
+      var chips = items.map(function(it){
+        return isColl
+          ? '<span class="relchip" style="background:'+chipBg+';color:'+chipFg+'">'+esc(it)+'</span>'
+          : '<span class="relchip" style="background:'+chipBg+';color:'+chipFg+'"><span class="mincho" style="font-weight:600">'+esc(it.word)+'</span>'+(it.meaning ? '<span style="color:'+dimFg+';font-size:.75rem">'+esc(it.meaning)+'</span>' : "")+'</span>';
+      }).join("");
+      return '<div style="margin-top:.625rem"><p style="font-size:.75rem;font-weight:700;color:'+dimFg+'">'+label+'</p><div style="margin-top:.375rem;display:flex;flex-wrap:wrap;gap:.375rem">'+chips+'</div></div>';
+    }
+    return '<div style="border:1px solid '+(onPaper?"var(--border)":"var(--border)")+';border-radius:.75rem;padding:1rem">'
+      + '<p style="display:flex;align-items:center;gap:.375rem;font-size:.75rem;font-weight:700;letter-spacing:.05em;color:var(--jade)">'+icon(I.bookOpen,14)+' 拓展词汇 · 记一个带一串</p>'
+      + group("同义词", r.synonyms, false) + group("反义词", r.antonyms, false) + group("常见搭配", r.collocations, true)
+      + '</div>';
+  }
+  return '<button type="button" '+btnAttr+'="'+w.id+'" style="display:flex;width:100%;align-items:center;justify-content:center;gap:.5rem;border:1px dashed var(--jade);border-radius:.75rem;padding:.75rem 0;font-size:.875rem;font-weight:500;color:'+chipFg+';background:none">'+icon(I.bookOpen,16)+' <span>AI 拓展：同义词 · 反义词 · 搭配</span></button>'
+    + '<p data-relerr="'+w.id+'" style="margin-top:.5rem;text-align:center;font-size:.75rem;color:var(--accent)"></p>';
+}
+function bindRelated(scope, w, onDone){
+  Array.prototype.forEach.call(scope.querySelectorAll("[data-related]"), function(b){
+    b.addEventListener("click", function(e){
+      e.stopPropagation();
+      b.disabled = true;
+      var label = b.querySelector("span"); if(label) label.textContent = "整理中…";
+      aiRelated(w).then(function(){ onDone(); }).catch(function(err){
+        b.disabled = false; if(label) label.textContent = "AI 拓展：同义词 · 反义词 · 搭配";
+        var el = scope.querySelector('[data-relerr="'+w.id+'"]');
+        if(el) el.textContent = err && err.message ? err.message : "整理失败，请重试。";
+      });
+    });
+  });
+}
+
+/* ---------- offline preset word pack (no API key / no network needed) ---------- */
+var PRESET_WORDS = [
+  {word:"曖昧",reading:"あいまい",pos:"な形容词",meaning:"含糊不清；暧昧",exampleJp:"彼は曖昧な返事をした。",exampleCn:"他给了个含糊的回答。",mnemonic:"「曖」「昧」都带日字旁，像隔着一层雾看太阳，看不清——就是含糊。",freqRank:1},
+  {word:"相変わらず",reading:"あいかわらず",pos:"副词",meaning:"照旧；依然",exampleJp:"彼は相変わらず忙しい。",exampleCn:"他依然很忙。",mnemonic:"「変わらず」就是没变：和以前一样，老样子。",freqRank:1},
+  {word:"思い切って",reading:"おもいきって",pos:"副词",meaning:"下定决心；断然地",exampleJp:"思い切って告白した。",exampleCn:"一狠心告白了。",mnemonic:"「思い」是想法，「切る」是切断——斩断犹豫，下定决心。",freqRank:1},
+  {word:"見逃す",reading:"みのがす",pos:"动词",meaning:"错过；看漏；放过",exampleJp:"チャンスを見逃すな。",exampleCn:"别错过机会。",mnemonic:"「逃」是逃跑，眼睁睁看它逃走，就是错过。",freqRank:1},
+  {word:"申し訳ない",reading:"もうしわけない",pos:"い形容词",meaning:"非常抱歉；过意不去",exampleJp:"遅れて申し訳ない。",exampleCn:"迟到了非常抱歉。",mnemonic:"「訳」是理由：连解释的理由都找不出来，就是太抱歉了。",freqRank:1},
+  {word:"とりあえず",reading:"とりあえず",pos:"副词",meaning:"暂且；先……再说",exampleJp:"とりあえず乾杯しよう。",exampleCn:"先干一杯吧。",mnemonic:"居酒屋点单的第一句永远是它：先来着，其他再说。",freqRank:1},
+  {word:"躊躇う",reading:"ためらう",pos:"动词",meaning:"犹豫；踌躇",exampleJp:"彼は答えるのを躊躇った。",exampleCn:"他犹豫着没有回答。",mnemonic:"「躊」「躇」都带足字旁，脚步停住迈不出去，就是犹豫。",freqRank:2},
+  {word:"戸惑う",reading:"とまどう",pos:"动词",meaning:"困惑；不知所措",exampleJp:"急な質問に戸惑った。",exampleCn:"被突然一问，我不知所措。",mnemonic:"「戸」是门，「惑」是迷惑：站在门口迷糊了，进退两难。",freqRank:2},
+  {word:"慎む",reading:"つつしむ",pos:"动词",meaning:"谨慎；节制；戒慎",exampleJp:"言葉を慎むべきだ。",exampleCn:"说话应该谨慎。",mnemonic:"「慎」里藏着「真」：真心收着点，言行都谨慎。",freqRank:2},
+  {word:"怠る",reading:"おこたる",pos:"动词",meaning:"怠慢；疏忽",exampleJp:"準備を怠るな。",exampleCn:"不要疏忽准备工作。",mnemonic:"「怠」心上有个「台」，人懒在台子上不动，就是怠慢。",freqRank:2},
+  {word:"妨げる",reading:"さまたげる",pos:"动词",meaning:"妨碍；阻碍",exampleJp:"睡眠を妨げる。",exampleCn:"妨碍睡眠。",mnemonic:"「妨」女字旁加「方」，方方正正一块挡在路上，就是妨碍。",freqRank:2},
+  {word:"尽くす",reading:"つくす",pos:"动词",meaning:"竭尽；尽力",exampleJp:"全力を尽くす。",exampleCn:"竭尽全力。",mnemonic:"「尽」就是用完：把力气全部用上，就是尽くす。",freqRank:2},
+  {word:"果たす",reading:"はたす",pos:"动词",meaning:"完成；履行（职责、约定）",exampleJp:"約束を果たす。",exampleCn:"履行约定。",mnemonic:"「果」是结了果：事情结出果实，就是完成、实现了。",freqRank:2},
+  {word:"恐れ",reading:"おそれ",pos:"名词",meaning:"恐惧；担忧；危险",exampleJp:"失敗する恐れがある。",exampleCn:"有失败的危险。",mnemonic:"「恐」心上有「巩」压着，牢牢压住心，就是害怕。",freqRank:2},
+  {word:"懸念",reading:"けねん",pos:"名词",meaning:"担忧；挂念",exampleJp:"健康への懸念が広がっている。",exampleCn:"对健康的担忧正在扩散。",mnemonic:"「懸」是悬挂，「念」是念头：心里挂着个念头放不下。",freqRank:2},
+  {word:"慌ただしい",reading:"あわただしい",pos:"い形容词",meaning:"忙乱；慌张",exampleJp:"慌ただしい朝だった。",exampleCn:"那是个忙乱的早晨。",mnemonic:"「慌」心里长了草，乱成一团，就是慌。",freqRank:2},
+  {word:"やむを得ない",reading:"やむをえない",pos:"连体词",meaning:"不得已；无可奈何",exampleJp:"やむを得ない事情で欠席した。",exampleCn:"因不得已的情况缺席了。",mnemonic:"「得ない」是得不到（办法）：没办法，就是不得已。",freqRank:2},
+  {word:"顕著",reading:"けんちょ",pos:"な形容词",meaning:"显著；明显",exampleJp:"顕著な進歩が見られた。",exampleCn:"看到了显著的进步。",mnemonic:"「顕」是显现，「著」是著名：明显到出名，就是显著。",freqRank:2},
+  {word:"損なう",reading:"そこなう",pos:"动词",meaning:"损害；损伤",exampleJp:"健康を損なう。",exampleCn:"损害健康。",mnemonic:"「損」是提手旁：亲手弄坏了，就是损伤。",freqRank:3},
+  {word:"培う",reading:"つちかう",pos:"动词",meaning:"培养；培育",exampleJp:"若い才能を培う。",exampleCn:"培养年轻的人才。",mnemonic:"「培」是土字旁：在土里慢慢养，就是培育。",freqRank:3},
+  {word:"打ち明ける",reading:"うちあける",pos:"动词",meaning:"坦白；吐露（心事）",exampleJp:"悩みを打ち明ける。",exampleCn:"倾诉烦恼。",mnemonic:"「明ける」是天亮：把心里话说到天亮，就是坦白。",freqRank:3},
+  {word:"著しい",reading:"いちじるしい",pos:"い形容词",meaning:"显著的；惊人的",exampleJp:"著しい成長を遂げた。",exampleCn:"取得了惊人的成长。",mnemonic:"和「顕著」是亲戚，都是明显得不得了。",freqRank:3}
+];
+function importPresetWords(){
+  var today = todayJST();
+  var seen = {}; DB.words.forEach(function(w){ seen[w.word]=1; });
+  var added = 0;
+  PRESET_WORDS.forEach(function(p){
+    if(seen[p.word]) return; seen[p.word]=1;
+    DB.words.push({ id: DB.nextWordId++, word:p.word, reading:p.reading, pos:p.pos, meaning:p.meaning, exampleJp:p.exampleJp, exampleCn:p.exampleCn, mnemonic:p.mnemonic, freqRank:p.freqRank, related:null, box:0, dueDate:today, batchDate:today, source:"preset", createdAt:new Date().toISOString() });
+    added++;
+  });
+  if(added) saveDB();
+  return added;
 }
 
 /* ---------- derived state (mirrors the Muse version) ---------- */
@@ -461,7 +570,12 @@ function computeState(){
     cardMode: DB.settings.cardMode==="cn2jp" ? "cn2jp" : "jp2cn",
     forecast: [1,2,3,4,5,6,7].map(function(n){ var d2=addDays(today,n); return {date:d2, count: all.filter(function(w){ return w.dueDate===d2; }).length}; }),
     boxDistribution: [0,1,2,3,4].map(function(b){ return all.filter(function(w){ return w.box===b; }).length; }),
-    todayReviewList: todayReviews.slice().sort(function(a,b){ return a.id-b.id; }).map(function(r){ var w=byId[r.wordId]; return w ? {wordId:w.id, word:w.word, reading:w.reading, meaning:w.meaning, result:r.result} : null; }).filter(Boolean)
+    todayReviewList: todayReviews.slice().sort(function(a,b){ return a.id-b.id; }).map(function(r){ var w=byId[r.wordId]; return w ? {wordId:w.id, word:w.word, reading:w.reading, meaning:w.meaning, result:r.result} : null; }).filter(Boolean),
+    examDate: DB.examDate || null,
+    examDaysLeft: DB.examDate ? Math.round((new Date(DB.examDate+"T00:00:00Z").getTime() - new Date(today+"T00:00:00Z").getTime())/86400000) : null,
+    last7: [0,1,2,3,4,5,6].map(function(i){ var d3=addDays(today, i-6); var c3=byDate[d3]||{count:0,known:0}; return {date:d3, count:c3.count, known:c3.known}; }),
+    weekKnown: DB.reviews.filter(function(r){ return r.date>=weekStart && r.result==="known"; }).length,
+    weekNew: all.filter(function(w){ return w.batchDate>=weekStart; }).length
   };
 }
 function reviewWord(wordId, result){
@@ -495,7 +609,7 @@ function saveWordToBook(entry, source){
   if(dup) return dup.id;
   var today = todayJST();
   var id = DB.nextWordId++;
-  DB.words.push({ id:id, word:entry.word, reading:entry.reading||"", pos:entry.pos||"", meaning:entry.meaning||"", exampleJp:entry.exampleJp||"", exampleCn:entry.exampleCn||"", mnemonic:entry.mnemonic||null, freqRank:entry.freqRank||null, box:0, dueDate:today, batchDate:today, source:source||"lookup", createdAt:new Date().toISOString() });
+  DB.words.push({ id:id, word:entry.word, reading:entry.reading||"", pos:entry.pos||"", meaning:entry.meaning||"", exampleJp:entry.exampleJp||"", exampleCn:entry.exampleCn||"", mnemonic:entry.mnemonic||null, freqRank:entry.freqRank||null, related:null, box:0, dueDate:today, batchDate:today, source:source||"lookup", createdAt:new Date().toISOString() });
   saveDB(); return id;
 }
 function shuffle(arr){
@@ -577,7 +691,89 @@ function bindSpeakers(root){
 }
 
 /* ---------- study view ---------- */
-var studyUI = { busy:false, lastResult:null, undoable:null, milestoneSeen:false, extraNotice:null, genError:null, extraError:null, autoSpeak: lsGet("vocab-autospeak")==="1", lastSpokenId:null, advanced:false, flyIn:false };
+var studyUI = { busy:false, lastResult:null, undoable:null, milestoneSeen:false, extraNotice:null, genError:null, extraError:null, autoSpeak: lsGet("vocab-autospeak")==="1", lastSpokenId:null, advanced:false, flyIn:false, examEdit:false };
+function examHtml(st){
+  if(studyUI.examEdit || !st.examDate){
+    return '<div class="examset anim-slide-up" style="margin-bottom:1rem">'
+      + '<p style="display:flex;align-items:center;gap:.5rem;font-size:.875rem;font-weight:700"><span style="color:var(--gold);display:inline-flex">'+icon(I.target,17)+'</span> '+(st.examDate ? "修改考试目标" : "定个考试目标，每天打开都有倒计时")+'</p>'
+      + '<p style="margin-top:.25rem;font-size:.75rem;line-height:1.6;color:var(--dim)">比如 JLPT 考试日。选好日期保存，学习页顶部就会挂上还剩多少天。</p>'
+      + '<div style="margin-top:.75rem;display:flex;flex-wrap:wrap;gap:.5rem;align-items:center"><input type="date" id="exam-date" class="dateinput" aria-label="考试日期" value="'+esc(st.examDate||"")+'">'
+      + '<button type="button" id="exam-save" class="btn btn-accent" style="padding:.625rem 1.25rem;font-size:.875rem">保存</button>'
+      + (st.examDate ? '<button type="button" id="exam-clear" class="btn btn-surface" style="padding:.625rem 1rem;font-size:.875rem">清除</button><button type="button" id="exam-cancel" class="btn" style="padding:.625rem .75rem;font-size:.875rem;color:var(--dim)">取消</button>' : "")
+      + '</div></div>';
+  }
+  var d = new Date(st.examDate+"T00:00:00");
+  var dateTxt = (d.getMonth()+1)+"月"+d.getDate()+"日";
+  var big, sub;
+  if(st.examDaysLeft>0){ big = st.examDaysLeft; sub = "天后开考 · 目标 "+dateTxt; }
+  else if(st.examDaysLeft===0){ big = 0; sub = "就是今天 · 稳住，你可以的"; }
+  else { big = "—"; sub = "目标日期（"+dateTxt+"）已经过了，换个新目标吧"; }
+  return '<div class="examcard anim-slide-up" style="margin-bottom:1rem" role="status" aria-label="距离考试还有 '+st.examDaysLeft+' 天">'
+    + '<div style="display:flex;align-items:flex-end;gap:1rem;position:relative;z-index:1"><div style="flex:1;min-width:0">'
+    + '<p style="font-size:.75rem;font-weight:700;letter-spacing:.12em;opacity:.9">距离 JLPT 考试</p>'
+    + '<p style="margin-top:.375rem;font-size:.875rem;opacity:.95">'+sub+'</p></div>'
+    + '<p style="text-align:right"><span class="days">'+big+'</span><span style="font-size:1rem;font-weight:700"> 天</span></p></div>'
+    + '<button type="button" id="exam-edit" style="position:relative;z-index:1;margin-top:.625rem;border-radius:9999px;padding:.3rem .8rem;font-size:.75rem;font-weight:600;background:rgba(255,255,255,.22);color:#fff">改日期</button>'
+    + '</div>';
+}
+function weeklyHtml(st){
+  return '<section class="anim-slide-up" style="margin-top:1.5rem" aria-label="本周学习小结">'
+    + '<div class="cardbox" style="padding:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:.75rem">'
+    + '<div style="flex:1;min-width:12rem"><p style="font-size:.875rem;font-weight:600">本周学习小结图</p>'
+    + '<p style="margin-top:.25rem;font-size:.75rem;line-height:1.6;color:var(--dim)">把最近 7 天的复习量、认识率和新学词数做成一张图，能存进相册，也能发给朋友看看。</p></div>'
+    + '<button type="button" id="weekly-btn" class="btn btn-grad" style="padding:.75rem 1.25rem;font-size:.875rem">'+icon(I.sparkle,16)+' 生成小结图</button>'
+    + '<div id="weekly-out" style="display:none;width:100%"><img id="weekly-img" class="weekimg" alt="本周学习小结图"><a id="weekly-dl" class="btn btn-jade" style="margin-top:.75rem;width:100%;padding:.75rem 0" download="本周学习小结.png">'+icon(I.download,17)+' 保存图片</a><p style="margin-top:.5rem;text-align:center;font-size:.75rem;color:var(--dim)">按钮存不下来的话，长按图片也能保存。</p></div>'
+    + '</div></section>';
+}
+function drawWeeklySummary(st){
+  var cv = document.createElement("canvas"); cv.width = 750; cv.height = 1000;
+  var ctx = cv.getContext("2d"); if(!ctx) return null;
+  var cs = getComputedStyle(document.documentElement);
+  var accent = (cs.getPropertyValue("--accent")||"").trim() || "#d93a2e";
+  var gold = (cs.getPropertyValue("--gold")||"").trim() || "#a97a1c";
+  var jade = (cs.getPropertyValue("--jade")||"").trim() || "#1f8a5b";
+  function rr(x,y,w,h,r){ ctx.beginPath(); if(ctx.roundRect){ ctx.roundRect(x,y,w,h,r); } else { ctx.rect(x,y,w,h); } }
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0,0,750,1000);
+  var grad = ctx.createLinearGradient(0,0,750,300); grad.addColorStop(0,gold); grad.addColorStop(1,accent);
+  ctx.fillStyle = grad; rr(0,0,750,300,0); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.16)"; ctx.beginPath(); ctx.arc(660,40,130,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.textAlign = "left";
+  ctx.font = "700 30px 'Hiragino Sans',sans-serif"; ctx.fillText("今週のまとめ", 56, 92);
+  ctx.font = "800 58px 'Hiragino Sans',sans-serif"; ctx.fillText("本周学习小结", 56, 168);
+  var f = new Date(st.last7[0].date+"T00:00:00"), l = new Date(st.last7[6].date+"T00:00:00");
+  ctx.font = "400 28px 'Hiragino Sans',sans-serif"; ctx.globalAlpha = .92;
+  ctx.fillText((f.getMonth()+1)+"月"+f.getDate()+"日 – "+(l.getMonth()+1)+"月"+l.getDate()+"日 · JLPT N1 背词卡", 56, 226);
+  ctx.globalAlpha = 1;
+  var acc7 = st.weekTotal ? Math.round(st.weekKnown/st.weekTotal*100) : 0;
+  var stats = [
+    {n:String(st.weekTotal), label:"本周复习（次）", c:accent},
+    {n:acc7+"%", label:"本周认识率", c:jade},
+    {n:String(st.weekNew), label:"本周新学（词）", c:gold},
+    {n:String(st.streak), label:"连续学习（天）", c:accent}
+  ];
+  stats.forEach(function(s,i){
+    var x = 56 + (i%2)*329, y = 348 + Math.floor(i/2)*168;
+    ctx.fillStyle = "#f2f3f5"; rr(x,y,309,148,24); ctx.fill();
+    ctx.fillStyle = s.c; ctx.font = "800 64px 'Hiragino Sans',sans-serif"; ctx.fillText(s.n, x+28, y+78);
+    ctx.fillStyle = "#68708a"; ctx.font = "500 26px 'Hiragino Sans',sans-serif"; ctx.fillText(s.label, x+28, y+122);
+  });
+  ctx.fillStyle = "#1e2235"; ctx.font = "700 30px 'Hiragino Sans',sans-serif"; ctx.fillText("每天复习量", 56, 748);
+  var maxC = 1; st.last7.forEach(function(d){ if(d.count>maxC) maxC = d.count; });
+  var wkTxt = ["日","一","二","三","四","五","六"];
+  st.last7.forEach(function(d,i){
+    var bx = 66 + i*94, bh = Math.round(d.count/maxC*110), by = 906 - bh;
+    ctx.fillStyle = d.count ? accent : "#e7e9ee"; rr(bx, by, 52, Math.max(bh,6), 10); ctx.fill();
+    ctx.fillStyle = "#1e2235"; ctx.font = "700 24px 'Hiragino Sans',sans-serif"; ctx.textAlign = "center";
+    if(d.count) ctx.fillText(String(d.count), bx+26, by-12);
+    ctx.fillStyle = "#68708a"; ctx.font = "400 22px 'Hiragino Sans',sans-serif";
+    var dd = new Date(d.date+"T00:00:00");
+    ctx.fillText("周"+(wkTxt[dd.getDay()]||""), bx+26, 940);
+    ctx.textAlign = "left";
+  });
+  ctx.fillStyle = "#68708a"; ctx.font = "400 25px 'Hiragino Sans',sans-serif";
+  ctx.fillText("词库共 "+st.totalWords+" 词 · 已掌握 "+st.masteredWords+" 词", 56, 982 - 6);
+  return cv.toDataURL("image/png");
+}
 function heatmapHtml(st){
   var max = 1; st.calendar.forEach(function(c){ if(c.count>max) max=c.count; });
   var total = st.calendar.reduce(function(s,c){ return s+c.count; },0);
@@ -672,6 +868,7 @@ function cardFaceBack(w){
     + '<div style="margin-top:1.25rem;border-top:1px dashed var(--paper-dim);padding-top:1rem"><p style="font-size:1.125rem;font-weight:500;line-height:1.65">'+esc(w.meaning)+'</p></div>'
     + (w.exampleJp ? '<div style="margin-top:1rem;border-radius:.75rem;padding:1rem;background:var(--paper-dim)"><p class="mincho" style="font-size:1rem;line-height:1.65">'+esc(w.exampleJp)+'</p>'+(w.exampleCn?'<p style="margin-top:.375rem;font-size:.875rem;color:var(--ink-dim)">'+esc(w.exampleCn)+'</p>':"")+'</div>' : "")
     + '<div style="margin-top:1rem;flex:1">'+mn+'</div>'
+    + '<div style="margin-top:1rem">'+relatedHtml(w, true, "data-related")+'</div>'
     + '<p class="hint" style="margin-top:1rem;text-align:center">再 点 一 次 翻 回 去</p></div>';
 }
 function renderStudy(st){
@@ -687,6 +884,7 @@ function renderStudy(st){
   if(!isStandalone() && lsGet("vocab-install-dismissed")!=="1"){
     h += '<div class="anim-toast" role="status" style="margin-bottom:1rem;display:flex;align-items:center;gap:.75rem;border-radius:1rem;padding:.75rem 1rem;background:var(--surface);border:1px dashed var(--gold)"><span style="color:var(--gold)">'+icon(I.home,20)+'</span><p style="flex:1;font-size:.875rem;line-height:1.45"><strong>桌面版</strong>：可以添加到手机主屏幕，点开就像 App 一样。<span style="display:block;font-size:.75rem;color:var(--dim)">方法在「设置 → 添加到手机桌面」里，一分钟搞定。</span></p><button type="button" id="install-go" class="btn btn-accent" style="padding:.5rem .875rem;font-size:.8125rem">去看看</button><button type="button" id="install-x" aria-label="关闭桌面版提示" class="iconbtn" style="padding:.375rem;color:var(--dim)">'+icon(I.x,15)+'</button></div>';
   }
+  h += examHtml(st);
   h += '<div style="margin-bottom:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem">'
     + chip('<span class="anim-flame">'+icon(I.flame,14)+'</span> 连续 '+st.streak+' 天', "var(--gold)")
     + chip("词库 "+st.totalWords+" 词")
@@ -736,9 +934,13 @@ function renderStudy(st){
         ? '<button type="button" id="gen-btn" class="btn btn-accent" style="margin-top:1.5rem;display:inline-flex;padding:.875rem 2rem;font-size:1rem" '+(studyUI.busy?"disabled":"")+'>'+(studyUI.busy?"AI 正在出词，稍等…":"生成今日单词")+'</button>'
         : '<button type="button" id="go-settings" class="btn btn-accent" style="margin-top:1.5rem;display:inline-flex;padding:.875rem 2rem;font-size:1rem">去设置 API Key</button>')
       + (studyUI.genError ? '<p style="margin:1rem auto 0;max-width:20rem;font-size:.875rem;color:var(--accent)">'+esc(studyUI.genError)+'</p>' : "")
+      + '<div style="margin:1.75rem auto 0;max-width:20rem;border-top:1px dashed var(--border);padding-top:1.25rem"><p style="font-size:.875rem;font-weight:600">没有 Key、没有网，也能先学</p>'
+      + '<p style="margin:.375rem auto 0;font-size:.75rem;line-height:1.65;color:var(--dim)">内置一份离线词包：'+PRESET_WORDS.length+' 个 N1 高频词，带读音、释义、例句和助记，导入就能开刷。</p>'
+      + '<button type="button" id="preset-btn" class="btn btn-surface" style="margin-top:.75rem;display:inline-flex;padding:.75rem 1.5rem">'+icon(I.download,16)+' 导入离线词包</button></div>'
       + '</div>';
   }
   h += statsHtml(st);
+  h += weeklyHtml(st);
   h += '</div>';
   view.innerHTML = h;
   afterStudyRender(st);
@@ -886,38 +1088,29 @@ function mountCard(wrap, w, depth, mode){
   wrap.addEventListener("pointercancel", function(){
     pointer = null; snapping = true; drag = {x:0,y:0}; applyTransform();
   });
-  bindSpeakers(wrap);
-  Array.prototype.forEach.call(wrap.querySelectorAll("[data-genmn],[data-regen]"), function(b){
-    b.addEventListener("click", function(e){
-      e.stopPropagation();
-      var regen = b.hasAttribute("data-regen");
-      var errEl = back.querySelector('[data-mnerr="'+w.id+'"]');
-      b.disabled = true;
-      var label = b.querySelector("span"); if(label) label.textContent = "想着呢…";
-      aiMnemonic(w, regen).then(function(){
-        back.innerHTML = cardFaceBack(w); bindSpeakers(back); rebindMnemonic(back, w, inner, function(v){ flippedRef.v=v; });
-      }).catch(function(err){
-        b.disabled = false; if(label) label.textContent = regen ? "换一个" : "AI 助记";
-        if(errEl) errEl.textContent = err && err.message ? err.message : "生成失败，请重试。";
-      });
-    });
-  });
-}
-function rebindMnemonic(back, w, inner, setFlipped){
-  Array.prototype.forEach.call(back.querySelectorAll("[data-genmn],[data-regen]"), function(b){
-    b.addEventListener("click", function(e){
-      e.stopPropagation();
-      var regen = b.hasAttribute("data-regen");
-      b.disabled = true;
-      aiMnemonic(w, regen).then(function(){
-        back.innerHTML = cardFaceBack(w); bindSpeakers(back); rebindMnemonic(back, w, inner, setFlipped);
-      }).catch(function(err){
-        b.disabled = false;
+  function refreshBack(){
+    back.innerHTML = cardFaceBack(w);
+    bindSpeakers(back);
+    bindBackActions();
+  }
+  function bindBackActions(){
+    Array.prototype.forEach.call(back.querySelectorAll("[data-genmn],[data-regen]"), function(b){
+      b.addEventListener("click", function(e){
+        e.stopPropagation();
+        var regen = b.hasAttribute("data-regen");
         var errEl = back.querySelector('[data-mnerr="'+w.id+'"]');
-        if(errEl) errEl.textContent = err && err.message ? err.message : "生成失败，请重试。";
+        b.disabled = true;
+        var label = b.querySelector("span"); if(label) label.textContent = "想着呢…";
+        aiMnemonic(w, regen).then(function(){ refreshBack(); }).catch(function(err){
+          b.disabled = false; if(label) label.textContent = regen ? "换一个" : "AI 助记";
+          if(errEl) errEl.textContent = err && err.message ? err.message : "生成失败，请重试。";
+        });
       });
     });
-  });
+    bindRelated(back, w, refreshBack);
+  }
+  bindSpeakers(wrap);
+  bindBackActions();
 }
 function onCardSwipe(w, result){
   buzz(result==="known" ? 12 : [16,40,16]);
@@ -928,6 +1121,39 @@ function onCardSwipe(w, result){
   render();
 }
 function afterStudyRender(st){
+  // exam countdown controls
+  var ee = document.getElementById("exam-edit");
+  if(ee) ee.addEventListener("click", function(){ studyUI.examEdit = true; render(); });
+  var esv = document.getElementById("exam-save");
+  if(esv) esv.addEventListener("click", function(){
+    var inp = document.getElementById("exam-date");
+    var v = inp ? inp.value : "";
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(v)){ toast("先选一个考试日期"); return; }
+    DB.examDate = v; saveDB(); studyUI.examEdit = false; render();
+    toast("考试目标已设定，倒计时开始");
+  });
+  var ecl = document.getElementById("exam-clear");
+  if(ecl) ecl.addEventListener("click", function(){ DB.examDate = null; saveDB(); studyUI.examEdit = false; render(); });
+  var eca = document.getElementById("exam-cancel");
+  if(eca) eca.addEventListener("click", function(){ studyUI.examEdit = false; render(); });
+  // offline preset pack
+  var pb = document.getElementById("preset-btn");
+  if(pb) pb.addEventListener("click", function(){
+    var n = importPresetWords();
+    if(n>0){ studyUI.flyIn = true; toast("离线词包已导入 "+n+" 个词，开刷吧"); }
+    else toast("离线词包的词已经都在词库里了");
+    render();
+  });
+  // weekly summary image
+  var wb = document.getElementById("weekly-btn");
+  if(wb) wb.addEventListener("click", function(){
+    var url = drawWeeklySummary(st);
+    if(!url){ toast("生成失败，请再试一次"); return; }
+    var out = document.getElementById("weekly-out"), img = document.getElementById("weekly-img"), dl = document.getElementById("weekly-dl");
+    if(img) img.src = url;
+    if(dl) dl.href = url;
+    if(out){ out.style.display = "block"; out.scrollIntoView({behavior:"smooth", block:"nearest"}); }
+  });
   // count-ups
   Array.prototype.forEach.call(view.querySelectorAll("[data-countup]"), function(el){
     countUp(el, parseInt(el.getAttribute("data-countup"),10)||0);
@@ -1119,7 +1345,7 @@ function renderQuiz(st){
         }).join("") + '</div>';
     if(quizUI.picked!==null){
       h += '<div class="anim-slide-up" style="margin-top:1rem;border-radius:1rem;padding:1rem;background:var(--surface)"><p style="font-size:.875rem;line-height:1.65"><span class="mincho" style="font-size:1rem;font-weight:600">'+esc(cur.word)+'</span> <span class="mincho" style="color:var(--dim)">'+esc(cur.reading)+'</span> · '+esc(cur.meaning)+'</p>'
-        + (cur.exampleJp ? '<p class="mincho" style="margin-top:.375rem;font-size:.875rem;line-height:1.65;color:var(--dim)">'+esc(cur.exampleJp)+(cur.exampleCn ? '<span style="font-family:var(--font-gothic)">（'+esc(cur.exampleCn)+'）</span>' : "")+'</p>' : "")
+        + (cur.exampleJp ? '<div style="margin-top:.375rem;display:flex;align-items:flex-start;gap:.5rem"><p class="mincho" style="flex:1;font-size:.875rem;line-height:1.65;color:var(--dim)">'+esc(cur.exampleJp)+(cur.exampleCn ? '<span style="font-family:var(--font-gothic)">（'+esc(cur.exampleCn)+'）</span>' : "")+'</p>'+speakerBtn(cur.exampleJp, "朗读例句", 32)+'</div>' : "")
         + '<button type="button" id="quiz-next" class="btn btn-accent" style="margin-top:.875rem;width:100%;padding:.75rem 0">'+(quizUI.idx+1>=qs.length ? "看结果" : "下一题 →")+'</button></div>';
     }
     h += '</div>';
@@ -1259,10 +1485,57 @@ function renderLookup(st){
 }
 
 /* ---------- words view ---------- */
-var wordsUI = { filter:"all", search:"", expanded:null, regenError:null, regenBusy:false };
+var wordsUI = { filter:"all", search:"", expanded:null, regenError:null, regenBusy:false, drill:null, relBusy:false };
+function renderDrill(u){
+  var d = u.drill;
+  var h = '<div class="anim-rise"><div style="display:flex;align-items:center;gap:.75rem"><h2 class="mincho" style="font-size:1.375rem;font-weight:700">错词强化</h2><span style="margin-left:auto;font-size:.875rem;font-weight:600;color:var(--dim);font-variant-numeric:tabular-nums">'+Math.min(d.idx+1, d.list.length)+' / '+d.list.length+'</span><button type="button" id="drill-exit" class="btn btn-surface" style="padding:.375rem .875rem;font-size:.75rem">退出</button></div>'
+    + '<div class="progress sm" style="margin-top:.75rem" role="progressbar" aria-valuenow="'+d.idx+'" aria-valuemin="0" aria-valuemax="'+d.list.length+'" aria-label="错词强化进度"><div style="width:'+(d.list.length?Math.round(d.idx/d.list.length*100):0)+'%"></div></div>';
+  if(d.idx >= d.list.length){
+    h += '<div style="padding:2.5rem 0;text-align:center"><div class="anim-pop" style="font-size:3.5rem;line-height:1">🎯</div>'
+      + '<h3 class="mincho" style="margin-top:1rem;font-size:1.375rem;font-weight:700">这一轮刷完了</h3>'
+      + '<p style="margin-top:.5rem;font-size:.875rem;line-height:1.7;color:var(--dim)">'+d.list.length+' 个错词里，这次认识了 '+d.known+' 个。<br>还不认识的已经安排明天再回来找你。</p>'
+      + '<button type="button" id="drill-back" class="btn btn-accent" style="margin-top:1.25rem;display:inline-flex;padding:.75rem 1.75rem">回到错词本</button></div>';
+  } else {
+    var w = DB.words.filter(function(x){ return x.id===d.list[d.idx]; })[0];
+    if(!w){ d.idx++; renderDrill(u); return; }
+    h += '<div class="drillcard anim-pop" id="drill-card" style="margin-top:1.25rem" role="button" aria-label="点按卡片翻开看释义">';
+    if(!d.flipped){
+      h += (w.pos ? '<span class="poschip" style="display:inline-block">'+esc(w.pos)+'</span>' : "")
+        + '<p class="mincho" style="font-size:2.75rem;font-weight:600;line-height:1.15">'+esc(w.word)+'</p>'
+        + '<p class="mincho" style="margin-top:.75rem;font-size:1.125rem;color:var(--ink-dim)">'+esc(w.reading)+'</p>'
+        + '<div style="margin-top:1rem;display:flex;justify-content:center">'+speakerBtn(w.word, "朗读单词 "+w.word, 42)+'</div>'
+        + '<p class="hint" style="margin-top:1.5rem">点 按 卡 片 看 释 义</p>';
+    } else {
+      h += '<p style="font-size:1.25rem;font-weight:500;line-height:1.65">'+esc(w.meaning)+'</p>'
+        + (w.exampleJp ? '<div style="margin-top:1rem;border-radius:.75rem;padding:.875rem;background:var(--paper-dim);text-align:left"><div style="display:flex;align-items:flex-start;gap:.5rem"><p class="mincho" style="flex:1;line-height:1.65">'+esc(w.exampleJp)+'</p>'+speakerBtn(w.exampleJp, "朗读例句", 32)+'</div>'+(w.exampleCn?'<p style="margin-top:.25rem;font-size:.875rem;color:var(--ink-dim)">'+esc(w.exampleCn)+'</p>':"")+'</div>' : "")
+        + (w.mnemonic ? '<p style="margin-top:.75rem;font-size:.875rem;line-height:1.65;text-align:left"><span style="font-weight:700;color:var(--gold)">助记 · </span>'+esc(w.mnemonic)+'</p>' : "");
+    }
+    h += '</div>';
+    if(d.flipped){
+      h += '<div style="margin-top:1.25rem;display:flex;gap:.75rem"><button type="button" id="drill-no" class="btn" style="flex:1;padding:.875rem 0;color:#fff;background:var(--accent)">'+icon(I.x,18)+' 还是不认识</button><button type="button" id="drill-yes" class="btn" style="flex:1;padding:.875rem 0;color:#fff;background:var(--jade)">'+icon(I.check,18)+' 认识了</button></div>';
+    } else {
+      h += '<button type="button" id="drill-flip" class="btn btn-surface" style="margin-top:1.25rem;width:100%;padding:.875rem 0">翻开看释义</button>';
+    }
+  }
+  h += '</div>';
+  view.innerHTML = h;
+  var ex = document.getElementById("drill-exit"); if(ex) ex.addEventListener("click", function(){ u.drill = null; render(); });
+  var bk = document.getElementById("drill-back"); if(bk) bk.addEventListener("click", function(){ u.drill = null; render(); });
+  var dc = document.getElementById("drill-card"); if(dc) dc.addEventListener("click", function(e){ if(e.target.closest("button")) return; if(!d.flipped){ d.flipped = true; render(); } });
+  var fl = document.getElementById("drill-flip"); if(fl) fl.addEventListener("click", function(){ d.flipped = true; render(); });
+  function answer(res){
+    buzz(res==="known" ? 12 : [16,40,16]);
+    reviewWord(d.list[d.idx], res);
+    if(res==="known") d.known++;
+    d.idx++; d.flipped = false; render(); window.scrollTo(0,0);
+  }
+  var no = document.getElementById("drill-no"); if(no) no.addEventListener("click", function(){ answer("unknown"); });
+  var ys = document.getElementById("drill-yes"); if(ys) ys.addEventListener("click", function(){ answer("known"); });
+}
 var FILTERS = [{key:"all",label:"全部"},{key:"learning",label:"学习中"},{key:"mastered",label:"已掌握"},{key:"due",label:"待复习"},{key:"unknown",label:"错词本"}];
 function renderWords(st){
   var u = wordsUI, today = st.today;
+  if(u.drill){ renderDrill(u); return; }
   var latest = {};
   DB.reviews.slice().sort(function(a,b){ return a.id-b.id; }).forEach(function(r){ latest[r.wordId]=r.result; });
   var rows = DB.words.slice();
@@ -1284,6 +1557,12 @@ function renderWords(st){
     + '<div class="filterrow no-scrollbar" style="margin-top:.75rem">'
     + FILTERS.map(function(f){ return '<button type="button" data-filter="'+f.key+'" aria-pressed="'+(u.filter===f.key)+'" class="'+(u.filter===f.key?"on":"")+'">'+f.label+'</button>'; }).join("")
     + '</div>';
+  if(u.filter==="unknown" && words.length){
+    h += '<div class="cardbox anim-slide-up" style="margin-top:.75rem;padding:1rem;display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;border:1px solid var(--accent)">'
+      + '<div style="flex:1;min-width:11rem"><p style="font-size:.875rem;font-weight:700;color:var(--accent)">错词强化 · 共 '+words.length+' 个</p>'
+      + '<p style="margin-top:.25rem;font-size:.75rem;line-height:1.6;color:var(--dim)">把最近答错的词集中刷一遍：翻开卡片看释义，再选认识或不认识，结果会同步进复习节奏。</p></div>'
+      + '<button type="button" id="drill-start" class="btn btn-accent" style="padding:.75rem 1.25rem;font-size:.875rem">'+icon(I.target,16)+' 一键开练</button></div>';
+  }
   if(!words.length){
     h += '<div style="padding:3rem 0;text-align:center"><p style="font-size:2.25rem">'+(u.filter==="unknown"?"🎉":"📖")+'</p><p style="margin-top:.75rem;font-size:.875rem;color:var(--dim)">'
       + (q ? "没有找到和「"+esc(u.search.trim())+"」有关的词，换个关键词试试。" : u.filter==="unknown" ? "没有错词，最近答错的词会自动收进这里。" : "这里还空着。生成今日单词，或者去查词页加几个词进来。")
@@ -1295,10 +1574,11 @@ function renderWords(st){
           var detail = "";
           if(open){
             detail = '<div class="anim-rise" style="margin-top:.75rem;border-top:1px solid var(--border);padding-top:.75rem">'
-              + (w.exampleJp ? '<p class="mincho" style="font-size:.875rem;line-height:1.65">'+esc(w.exampleJp)+'</p>'+(w.exampleCn?'<p style="margin-top:.125rem;font-size:.875rem;color:var(--dim)">'+esc(w.exampleCn)+'</p>':"") : "")
+              + (w.exampleJp ? '<div style="display:flex;align-items:flex-start;gap:.5rem"><div style="flex:1;min-width:0"><p class="mincho" style="font-size:.875rem;line-height:1.65">'+esc(w.exampleJp)+'</p>'+(w.exampleCn?'<p style="margin-top:.125rem;font-size:.875rem;color:var(--dim)">'+esc(w.exampleCn)+'</p>':"")+'</div>'+speakerBtn(w.exampleJp, "朗读例句", 32)+'</div>' : "")
               + (w.mnemonic ? '<p style="margin-top:.5rem;font-size:.875rem"><span style="font-weight:700;color:var(--gold)">助记 · </span>'+esc(w.mnemonic)+'</p>' : "")
+              + '<div style="margin-top:.625rem">'+relatedHtml(w, false, "data-wrelated")+'</div>'
               + (u.regenError ? '<p style="margin-top:.5rem;font-size:.75rem;color:var(--accent)">'+esc(u.regenError)+'</p>' : "")
-              + '<p style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">下次复习：'+esc(w.dueDate)+(w.freqRank?" · 词频 "+(FREQ_LABEL[w.freqRank]||""):"")+(w.source==="ai"?" · AI 生成":w.source==="lookup"?" · 查词加入":" · 手动添加")+'</p>'
+              + '<p style="margin-top:.5rem;font-size:.75rem;color:var(--dim)">下次复习：'+esc(w.dueDate)+(w.freqRank?" · 词频 "+(FREQ_LABEL[w.freqRank]||""):"")+(w.source==="ai"?" · AI 生成":w.source==="lookup"?" · 查词加入":w.source==="preset"?" · 离线词包":" · 手动添加")+'</p>'
               + '<div style="margin-top:.625rem;display:flex;flex-wrap:wrap;gap:.5rem">'
               + '<button type="button" data-speak="'+esc(w.word)+'" class="btn" style="gap:.375rem;border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;font-weight:500;background:var(--surface-2);color:var(--text)">'+icon(I.speaker,15)+' 朗读</button>'
               + (w.mnemonic ? '<button type="button" data-wregen="'+w.id+'" class="btn" style="gap:.375rem;border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;font-weight:500;background:var(--surface-2);color:var(--text)" '+(u.regenBusy?"disabled":"")+'>'+icon(I.refresh,15)+(u.regenBusy?" 想着呢…":" 换个助记")+'</button>' : "")
@@ -1335,6 +1615,21 @@ function renderWords(st){
     var w = DB.words.filter(function(x){ return x.id===id; })[0]; if(!w) return;
     u.regenBusy = true; u.regenError = null; render();
     aiMnemonic(w, true).then(function(){ u.regenBusy = false; render(); }).catch(function(e){ u.regenBusy = false; u.regenError = e && e.message ? e.message : "换助记失败，请重试。"; render(); });
+  }); });
+  var ds = document.getElementById("drill-start");
+  if(ds) ds.addEventListener("click", function(){
+    var ids = words.filter(function(w){ return latest[w.id]==="unknown"; }).map(function(w){ return w.id; });
+    if(!ids.length) return;
+    u.drill = { list: shuffle(ids), idx: 0, flipped: false, known: 0 };
+    render(); window.scrollTo(0,0);
+  });
+  Array.prototype.forEach.call(view.querySelectorAll("[data-wrelated]"), function(b){ b.addEventListener("click", function(){
+    var id = parseInt(b.getAttribute("data-wrelated"),10);
+    var w = DB.words.filter(function(x){ return x.id===id; })[0]; if(!w || u.relBusy) return;
+    u.relBusy = true; u.regenError = null;
+    var label = b.querySelector("span"); if(label) label.textContent = "整理中…";
+    b.disabled = true;
+    aiRelated(w).then(function(){ u.relBusy = false; render(); }).catch(function(e){ u.relBusy = false; u.regenError = e && e.message ? e.message : "整理失败，请重试。"; render(); });
   }); });
 }
 </script>
@@ -1436,6 +1731,14 @@ function renderSettings(st){
     + '<button type="button" id="count-plus" aria-label="增加每天新词数量" class="iconbtn" style="width:2.75rem;height:2.75rem;font-size:1.25rem;font-weight:700;background:var(--surface-2)">+</button>'
     + '<span style="font-size:.875rem;color:var(--dim)">个 / 天（1–50）</span></div></section>';
 
+  /* 考试目标 */
+  h += '<section style="margin-top:1.75rem"><p style="display:flex;align-items:center;gap:.5rem;font-size:.875rem;font-weight:600"><span style="color:var(--accent);display:inline-flex">'+icon(I.target,17)+'</span> 考试目标日期</p>'
+    + '<p style="margin-top:.25rem;font-size:.75rem;line-height:1.65;color:var(--dim)">填上 JLPT 考试日（比如最近一次考试的日期），学习页顶部就会显示倒计时，每天打开都看得见还剩多少天。改完离开输入框就自动保存。</p>'
+    + '<div style="margin-top:.5rem;display:flex;align-items:center;gap:.5rem"><input type="date" id="set-exam" class="dateinput" aria-label="考试目标日期" value="'+esc(DB.examDate||"")+'" style="background:var(--surface);color:var(--text)">'
+    + (DB.examDate ? '<button type="button" id="exam-clear2" class="btn btn-surface" style="padding:.625rem 1rem;font-size:.875rem">清除</button>' : "")
+    + (st.examDate && st.examDaysLeft!==null && st.examDaysLeft>=0 ? '<span style="font-size:.875rem;font-weight:700;color:var(--accent)">还剩 '+st.examDaysLeft+' 天</span>' : "")
+    + '</div></section>';
+
   /* API Key */
   h += '<section style="margin-top:1.75rem"><label for="set-key" style="font-size:.875rem;font-weight:600">DeepSeek API Key</label>'
     + '<p style="margin-top:.25rem;font-size:.75rem;line-height:1.65;color:var(--dim)">'+(st.hasKey ? "当前已设置："+esc(st.keyHint||"••••")+"。留空保存不会覆盖它。" : "还没有设置。在 platform.deepseek.com 申请 Key 后粘贴到这里。")+'桌面版的 Key 只保存在这台设备的浏览器里，调用 AI 时由浏览器直连 DeepSeek，不经过其他服务器。桌面版和 Muse 版数据不互通，Key 需要在这里再填一次。</p>'
@@ -1527,6 +1830,17 @@ function renderSettings(st){
     u.notice = DB.settings.apiKey ? "已保存。现在可以去学习页生成今日单词了。" : "已保存。记得填上 API Key 才能用 AI 功能。";
     render();
   });
+  var sex = document.getElementById("set-exam");
+  if(sex) sex.addEventListener("change", function(){
+    var v = sex.value;
+    DB.examDate = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+    saveDB();
+    u.noticeOk = true;
+    u.notice = DB.examDate ? "考试日期已保存，学习页顶部会显示倒计时。" : "考试日期已清除。";
+    render();
+  });
+  var ec2 = document.getElementById("exam-clear2");
+  if(ec2) ec2.addEventListener("click", function(){ DB.examDate = null; saveDB(); u.noticeOk = true; u.notice = "考试日期已清除。"; render(); });
   var rt = document.getElementById("rem-toggle");
   rt.addEventListener("click", function(){
     var on = lsGet("vocab-reminder-enabled")==="1";
@@ -1541,8 +1855,8 @@ function renderSettings(st){
   function exportData(){
     var nameById = {}; DB.words.forEach(function(w){ nameById[w.id]=w.word; });
     return {
-      version: 1, exportedAt: new Date().toISOString(),
-      words: DB.words.map(function(w){ return { id:w.id, word:w.word, reading:w.reading, pos:w.pos, meaning:w.meaning, exampleJp:w.exampleJp, exampleCn:w.exampleCn, mnemonic:w.mnemonic, freqRank:w.freqRank, box:w.box, dueDate:w.dueDate, batchDate:w.batchDate, source:w.source, createdAt:w.createdAt||new Date().toISOString() }; }),
+      version: 1, exportedAt: new Date().toISOString(), examDate: DB.examDate || null,
+      words: DB.words.map(function(w){ return { id:w.id, word:w.word, reading:w.reading, pos:w.pos, meaning:w.meaning, exampleJp:w.exampleJp, exampleCn:w.exampleCn, mnemonic:w.mnemonic, freqRank:w.freqRank, related:w.related||null, box:w.box, dueDate:w.dueDate, batchDate:w.batchDate, source:w.source, createdAt:w.createdAt||new Date().toISOString() }; }),
       reviews: DB.reviews.filter(function(r){ return nameById[r.wordId]; }).map(function(r){ return { word:nameById[r.wordId], result:r.result, date:r.date }; }),
       settings: { dailyCount: DB.settings.dailyCount, model: DB.settings.model, cardMode: DB.settings.cardMode }
     };
@@ -1595,7 +1909,7 @@ function importBackup(data){
     if(!word) return;
     if(idByWord[word]){ skippedWords++; return; }
     var id = DB.nextWordId++;
-    DB.words.push({ id:id, word:word, reading:String(bw.reading||""), pos:String(bw.pos||""), meaning:String(bw.meaning||""), exampleJp:String(bw.exampleJp||""), exampleCn:String(bw.exampleCn||""), mnemonic: bw.mnemonic ? String(bw.mnemonic) : null, freqRank: (bw.freqRank>=1&&bw.freqRank<=5)?bw.freqRank:null, box: Math.min(4, Math.max(0, parseInt(bw.box,10)||0)), dueDate: /^\d{4}-\d{2}-\d{2}$/.test(bw.dueDate||"") ? bw.dueDate : today, batchDate: /^\d{4}-\d{2}-\d{2}$/.test(bw.batchDate||"") ? bw.batchDate : today, source: String(bw.source||"ai"), createdAt: bw.createdAt || new Date().toISOString() });
+    DB.words.push({ id:id, word:word, reading:String(bw.reading||""), pos:String(bw.pos||""), meaning:String(bw.meaning||""), exampleJp:String(bw.exampleJp||""), exampleCn:String(bw.exampleCn||""), mnemonic: bw.mnemonic ? String(bw.mnemonic) : null, freqRank: (bw.freqRank>=1&&bw.freqRank<=5)?bw.freqRank:null, related: (bw.related && typeof bw.related==="object") ? bw.related : null, box: Math.min(4, Math.max(0, parseInt(bw.box,10)||0)), dueDate: /^\d{4}-\d{2}-\d{2}$/.test(bw.dueDate||"") ? bw.dueDate : today, batchDate: /^\d{4}-\d{2}-\d{2}$/.test(bw.batchDate||"") ? bw.batchDate : today, source: String(bw.source||"ai"), createdAt: bw.createdAt || new Date().toISOString() });
     idByWord[word] = id; importedWords++;
   });
   var seen = {}; DB.reviews.forEach(function(r){ seen[r.wordId+"|"+r.date+"|"+r.result]=1; });
@@ -1608,6 +1922,7 @@ function importBackup(data){
     if(seen[k]) return; seen[k]=1;
     DB.reviews.push({ id: DB.nextReviewId++, wordId: wid, result: r.result, date: r.date }); importedReviews++;
   });
+  if(/^\d{4}-\d{2}-\d{2}$/.test(data.examDate||"") && !DB.examDate) DB.examDate = data.examDate;
   if(data.settings){
     if(data.settings.dailyCount>=1 && data.settings.dailyCount<=50) DB.settings.dailyCount = Math.round(data.settings.dailyCount);
     if(data.settings.model) DB.settings.model = String(data.settings.model).slice(0,60);

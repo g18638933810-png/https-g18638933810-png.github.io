@@ -1289,6 +1289,12 @@
       if (!topEl) return;
       var topWord = win[0];
       topEl.classList.add("anim-deck-in");
+      /* 入场动画 deck-in 用 fill both，最终帧 transform 会长期压住内联 transform，
+         导致拖动/飞出时卡片不动（只有印章在动）。动画一结束就摘掉这个类，
+         并在按下时兜底摘除，保证滑动 transform 立刻生效。 */
+      var clearDeckIn = function (e) { if (e && e.target !== topEl) return; topEl.classList.remove("anim-deck-in"); };
+      topEl.addEventListener("animationend", clearDeckIn);
+      setTimeout(function () { topEl.classList.remove("anim-deck-in"); }, 700);
       var flipped = false, drag = null, flying = false;
       var flipEl = topEl.querySelector(".flip-inner");
       var frontEl = topEl.querySelector(".face-front"), backEl = topEl.querySelector(".face-back");
@@ -1328,6 +1334,7 @@
       function onDown(e) {
         if (flying) return;
         if (e.target.closest("[data-speak],[data-mnemonic],[data-aiblock],[data-sentence],input,button,a")) return;
+        topEl.classList.remove("anim-deck-in");
         drag = { x0: e.clientX, y0: e.clientY, x: 0, y: 0, moved: false, id: e.pointerId };
         try { topEl.setPointerCapture(e.pointerId); } catch (err) {}
       }
